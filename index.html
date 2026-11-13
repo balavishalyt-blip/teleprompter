@@ -1,0 +1,708 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="theme-color" content="#000000">
+<title>Mirror Prompter</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+/* Layout: one link, three views — role picker, controller (script | live preview | settings), full-bleed prompter. */
+:root{
+  --bg:#eef0f3; --panel:#ffffff; --panel2:#f4f5f8; --line:#d9dce3; --fg:#161a22; --mute:#646b7a;
+  --tally:#d93a2b; --tally-fg:#ffffff; --ok:#1f9d55; --focus:#2f6fde;
+  --ui:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#101318; --panel:#171b22; --panel2:#1e232c; --line:#2a303b; --fg:#e7eaf0; --mute:#8d95a5;
+  --tally:#f0503f; --tally-fg:#ffffff; --ok:#3ccf7e; --focus:#6c9cff; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#101318; --panel:#171b22; --panel2:#1e232c; --line:#2a303b; --fg:#e7eaf0; --mute:#8d95a5;
+  --tally:#f0503f; --tally-fg:#ffffff; --ok:#3ccf7e; --focus:#6c9cff; color-scheme:dark}
+html,body{height:100%}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--ui);-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}
+button,select,input,textarea{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer}
+button:hover{border-color:var(--mute)}
+button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.mute{color:var(--mute)}
+
+/* ---------- picker ---------- */
+#picker{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding-block:32px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+#picker h1{margin:0;font-size:clamp(26px,5vw,40px);letter-spacing:-.02em;text-align:center;text-wrap:balance}
+#picker p{margin:0;color:var(--mute);text-align:center;max-width:46ch}
+.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;width:min(640px,100%)}
+.role{display:flex;flex-direction:column;gap:8px;text-align:left;padding:22px;border-radius:14px;background:var(--panel);border:1px solid var(--line);min-height:170px}
+.role:hover{border-color:var(--fg)}
+.role b{font-size:20px}
+.role .tag{font:700 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--tally)}
+.role svg{width:40px;height:40px;stroke:var(--fg);fill:none;stroke-width:1.6}
+#syncNote{font-size:12px;color:var(--mute);text-align:center;max-width:52ch}
+
+/* ---------- controller ---------- */
+#ctrl{height:100%;display:grid;grid-template-columns:320px minmax(0,1fr) 310px;grid-template-rows:auto minmax(0,1fr)}
+#ctrl header{grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-block:10px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));border-bottom:1px solid var(--line);background:var(--panel)}
+#ctrl header h1{font-size:15px;margin:0;font-weight:800}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;background:var(--panel2);color:var(--mute);font-size:12px}
+.pill i{width:8px;height:8px;border-radius:50%;background:var(--mute)}
+.pill.ok{color:var(--ok)} .pill.ok i{background:var(--ok)}
+.pill.live{color:var(--tally)} .pill.live i{background:var(--tally)}
+.spacer{flex:1}
+.col{min-height:0;overflow:auto;padding:12px}
+.col.left{display:flex;flex-direction:column;gap:8px;border-right:1px solid var(--line);padding-left:max(12px,env(safe-area-inset-left,0px))}
+.col.right{border-left:1px solid var(--line);padding-right:max(12px,env(safe-area-inset-right,0px))}
+#script{flex:1;min-height:220px;width:100%;resize:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:15px;line-height:1.55}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.center{display:flex;flex-direction:column;min-width:0;min-height:0}
+#devs{display:flex;gap:6px;padding:10px 12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid var(--line);min-height:50px}
+#pvWrap{flex:1;min-height:260px;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;background:var(--panel2)}
+#pvDevice{position:relative;overflow:hidden;border-radius:10px;box-shadow:0 0 0 3px var(--line),0 14px 40px rgba(0,0,0,.25);cursor:crosshair}
+#pvStage{transform-origin:0 0;position:absolute;left:0;top:0}
+#pvLabel{position:absolute;bottom:8px;left:12px;color:var(--mute);font:500 11px var(--mono)}
+.transport{display:flex;gap:8px;align-items:center;padding:10px 12px;border-top:1px solid var(--line);flex-wrap:wrap;background:var(--panel)}
+#play{min-width:118px;font-weight:800;font-size:15px;background:var(--tally);border-color:var(--tally);color:var(--tally-fg)}
+#play.playing{background:var(--fg);border-color:var(--fg);color:var(--bg)}
+.speed{display:flex;align-items:center;gap:6px;flex:1;min-width:220px}
+.speed input{flex:1;min-width:0}
+#status{width:100%;display:flex;gap:16px;flex-wrap:wrap;font:500 12px var(--mono);color:var(--mute)}
+#status b{color:var(--fg)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px}
+#qr{background:#fff;border-radius:8px;padding:8px;width:170px;height:170px;margin:8px auto}
+#qr svg{width:100%;height:100%;display:block}
+#codeBig{font:800 30px var(--mono);letter-spacing:.12em;text-align:center;margin:4px 0 2px}
+#qrText{font:500 11px var(--mono);word-break:break-all;text-align:center;color:var(--mute)}
+details{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:8px}
+summary{padding:10px 12px;cursor:pointer;font-weight:700;list-style:none;display:flex;justify-content:space-between}
+summary::after{content:"▾";color:var(--mute)}
+details:not([open]) summary::after{content:"▸"}
+.ctl{padding:2px 12px 10px}
+.ctl label{display:flex;justify-content:space-between;color:var(--mute);margin-bottom:3px;font-size:13px}
+.ctl label b{color:var(--fg);font:500 12px var(--mono)}
+.ctl input[type=range]{width:100%;accent-color:var(--tally)}
+.ctl select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px}
+.seg{display:flex;gap:4px;flex-wrap:wrap}.seg button{flex:1;padding:5px 6px;font-size:12px}
+.tg,.clr{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:2px 12px 10px;color:var(--mute);font-size:13px}
+.tg input{width:18px;height:18px;accent-color:var(--tally)}
+.clr input{width:44px;height:26px;border:0;background:none;padding:0}
+.presets{display:flex;gap:6px;padding:2px 12px 10px;flex-wrap:wrap}
+.presets button{width:40px;height:30px;padding:0;font-weight:800}
+.notice{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px}
+@media (max-width:1100px){
+  #ctrl{display:block;height:auto}
+  .col{overflow:visible}
+  .col.left,.col.right{border:0}
+  #pvWrap{height:56vh}
+  #script{height:240px}
+}
+
+/* ---------- prompter ---------- */
+#prom{position:fixed;inset:0;background:#000;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+#pStage{position:absolute;left:0;top:0;transform-origin:50% 50%}
+#probe{position:fixed;left:0;top:0;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px);visibility:hidden;pointer-events:none}
+#pStart,#pCode{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(0,0,0,.86);color:#fff;text-align:center;padding:24px;z-index:5;font-family:var(--ui)}
+#pStart b,#pCode b{font-size:28px}
+#pStart span,#pCode span{opacity:.7;max-width:36ch}
+#pStart button,#pCode button{background:#fff;color:#000;border:0;font-weight:800;font-size:17px;padding:12px 28px;border-radius:30px}
+#pPill{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:6;font:600 12px var(--ui);padding:5px 12px;border-radius:20px;background:#b3261e;color:#fff;max-width:calc(100% - 24px);text-align:center}
+#pCode input{font:700 28px var(--mono);letter-spacing:.15em;text-align:center;width:min(320px,90%);padding:12px;border-radius:12px;border:0;text-transform:uppercase}
+#pMenu{position:absolute;right:8px;bottom:8px;z-index:6;background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:20px;font-size:12px;padding:6px 12px;opacity:.5}
+
+/* ---------- shared stage (identical on phone and in preview) ---------- */
+.tp-stage{position:relative;overflow:hidden}
+.tp-view{position:absolute;inset:0;overflow:hidden}
+.tp-content{position:absolute;left:0;top:0;width:100%;will-change:transform;overflow-wrap:anywhere;-webkit-font-smoothing:antialiased}
+.tp-ln{white-space:pre-wrap}
+.tp-cue{color:var(--cue)}
+.tp-marker{position:absolute;left:0;right:0;height:0;pointer-events:none}
+.tp-marker.line::before{content:"";position:absolute;left:var(--ml);right:var(--mr);top:-1.5px;height:3px;background:var(--mk);opacity:.65;border-radius:2px}
+.tp-marker.band::before{content:"";position:absolute;left:var(--ml);right:var(--mr);top:calc(var(--lh) * -0.5);height:var(--lh);background:var(--mk);opacity:.16;border-radius:6px}
+.tp-marker.arrows::before,.tp-marker.arrows::after{content:"";position:absolute;top:calc(var(--as) * -1);border-top:var(--as) solid transparent;border-bottom:var(--as) solid transparent}
+.tp-marker.arrows::before{left:var(--al);border-left:calc(var(--as) * 1.25) solid var(--mk)}
+.tp-marker.arrows::after{right:var(--ar);border-right:calc(var(--as) * 1.25) solid var(--mk)}
+.tp-progress{position:absolute;height:4px;border-radius:2px;background:rgba(128,128,128,.28);pointer-events:none;overflow:hidden}
+.tp-progress i{display:block;height:100%;width:0;background:var(--mk)}
+.tp-count{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);font:800 10px var(--ui);pointer-events:none}
+.tp-count.on{display:flex}
+@media (prefers-reduced-motion: reduce){*{scroll-behavior:auto}}
+</style>
+
+<div id="app"></div>
+
+<script>
+// Devices talk through a free public MQTT relay. Every message is encrypted
+// (AES-GCM) with a key derived from the session code, so the relay can't read it.
+const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+const params = new URLSearchParams(location.search);
+const CODE_ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+function newCode() { const a = crypto.getRandomValues(new Uint8Array(8)); return Array.from(a, (b) => CODE_ALPHA[b % CODE_ALPHA.length]).join(''); }
+const cleanCode = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+const b64 = (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
+const Net = {
+  client: null, base: '', key: null, handlers: {}, connected: false, brokerIdx: 0,
+  async start(code) {
+    const enc = new TextEncoder();
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode('mirror-prompter:' + code)));
+    this.base = 'mirror-prompter/v1/' + Array.from(h.slice(0, 12), (b) => b.toString(16).padStart(2, '0')).join('');
+    const kb = await crypto.subtle.digest('SHA-256', enc.encode('key:' + code + ':mirror-prompter'));
+    this.key = await crypto.subtle.importKey('raw', kb, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    this.connect();
+  },
+  connect() {
+    if (typeof mqtt === 'undefined') { this.fire('conn', false); setTimeout(() => this.connect(), 3000); return; }
+    const url = BROKERS[this.brokerIdx % BROKERS.length];
+    const c = this.client = mqtt.connect(url, { clientId: 'mp_' + Math.random().toString(36).slice(2, 10), clean: true, reconnectPeriod: 2000, connectTimeout: 8000, keepalive: 30 });
+    let ok = false;
+    c.on('connect', () => { ok = true; this.connected = true; c.subscribe(this.base + '/#', { qos: 0 }); this.fire('conn', true); });
+    c.on('close', () => { if (this.connected) { this.connected = false; this.fire('conn', false); } });
+    c.on('message', (topic, payload) => this.recv(topic, payload));
+    setTimeout(() => { if (!ok && this.client === c) { try { c.end(true); } catch (e) {} this.brokerIdx++; this.connect(); } }, 10000);
+  },
+  async recv(topic, payload) {
+    try {
+      const str = payload.toString(); if (!str) return;
+      const b = unb64(str);
+      const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.slice(0, 12) }, this.key, b.slice(12));
+      const sub = topic.slice(this.base.length + 1);
+      this.fire(sub.split('/')[0], JSON.parse(new TextDecoder().decode(pt)), sub);
+    } catch (e) {}
+  },
+  async pub(sub, obj, retain) {
+    if (!this.client || !this.connected) return;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.key, new TextEncoder().encode(JSON.stringify(obj))));
+    const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
+    this.client.publish(this.base + '/' + sub, b64(out), { qos: 0, retain: !!retain });
+  },
+  on(t, fn) { (this.handlers[t] = this.handlers[t] || []).push(fn); },
+  fire(t, m, sub) { (this.handlers[t] || []).forEach((f) => f(m, sub)); },
+};
+
+const DEFAULTS = {
+  text: "Welcome to your teleprompter.\n\nOpen this same link on the device that sits in your rig and choose Prompter. Choose Controller here.\n\nEverything is driven from the controller: play, pause, speed, size, colors, margins and the reading line.\n\n[PAUSE]\n\nClick a line in the live preview to jump to it. Scroll over the preview to move the text by hand.\n\nPress the space bar to start and stop.\n\nWords in square brackets, like [SMILE] or [LOOK AT CAMERA], show as cues in a different color.\n\nPaste your own script on the left and you're ready.",
+  playing: false, speed: 20,
+  fontFamily: 'system', textSize: 12, fontWeight: 600, lineHeight: 1.3, paraSpacing: 0, letterSpacing: 0, wordSpacing: 0,
+  align: 'left', uppercase: false,
+  padX: 6, markerPos: 35, fadeEdges: true, fadeSize: 8, showProgress: true,
+  showMarker: true, markerStyle: 'arrows', markerColor: '#ff3b30',
+  textColor: '#ffffff', bgColor: '#000000', cueColor: '#ffb020',
+  mirrorX: true, mirrorY: false, rotate: 'auto', countdown: 3,
+};
+const FONTS = {
+  system: ['System', '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'],
+  inter: ['Inter', '"Inter", -apple-system, Roboto, sans-serif'],
+  helvetica: ['Helvetica', '"Helvetica Neue", Helvetica, Arial, sans-serif'],
+  verdana: ['Verdana', 'Verdana, Geneva, sans-serif'],
+  georgia: ['Georgia', 'Georgia, "Times New Roman", serif'],
+  times: ['Times', '"Times New Roman", Times, serif'],
+  mono: ['Monospace', '"JetBrains Mono", ui-monospace, Menlo, monospace'],
+};
+const $ = (s, r = document) => r.querySelector(s);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const Z = { t: 0, r: 0, b: 0, l: 0 };
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+/* ================= shared renderer ================= */
+const TP = {
+  esc: (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
+  html(text) {
+    return String(text || '').split(/\r?\n/).map((line) => {
+      const h = TP.esc(line).replace(/\[([^\]]+)\]/g, '<span class="tp-cue">[$1]</span>');
+      return '<div class="tp-ln">' + (h || '&#8203;') + '</div>';
+    }).join('');
+  },
+  mount(stage) {
+    stage.classList.add('tp-stage');
+    stage.innerHTML = '<div class="tp-view"><div class="tp-content"></div></div><div class="tp-marker"></div><div class="tp-progress"><i></i></div><div class="tp-count"></div>';
+    return { stage, view: $('.tp-view', stage), content: $('.tp-content', stage), marker: $('.tp-marker', stage),
+      progress: $('.tp-progress', stage), bar: $('.tp-progress i', stage), count: $('.tp-count', stage), text: null, para: null };
+  },
+  fontPx: (s, H) => Math.max(8, (s.textSize / 100) * H),
+  pxPerSec: (s, H) => (s.speed / 25) * TP.fontPx(s, H),
+  // Lay the script out for a W×H screen. Everything is sized from the screen itself,
+  // with side padding + safe-area insets, so nothing touches or crosses an edge.
+  apply(r, s, W, H, ins) {
+    ins = ins || Z;
+    const st = r.stage.style;
+    st.width = W + 'px'; st.height = H + 'px'; st.background = s.bgColor;
+    st.setProperty('--cue', s.cueColor); st.setProperty('--mk', s.markerColor);
+    if (r.text !== s.text) { r.content.innerHTML = TP.html(s.text); r.text = s.text; r.para = null; }
+    const fs = TP.fontPx(s, H), lh = fs * s.lineHeight;
+    const side = (W * s.padX) / 100;
+    const padL = side + ins.l, padR = side + ins.r;
+    const markerY = Math.round((H * s.markerPos) / 100);
+    const c = r.content.style;
+    c.fontFamily = (FONTS[s.fontFamily] || FONTS.system)[1];
+    c.fontSize = fs + 'px'; c.fontWeight = s.fontWeight; c.lineHeight = s.lineHeight;
+    c.letterSpacing = s.letterSpacing + 'em'; c.wordSpacing = s.wordSpacing + 'em';
+    c.textAlign = s.align; c.textTransform = s.uppercase ? 'uppercase' : 'none'; c.color = s.textColor;
+    c.paddingLeft = padL + 'px'; c.paddingRight = padR + 'px';
+    c.paddingTop = Math.max(0, markerY - lh / 2) + 'px';
+    c.paddingBottom = Math.max(0, H - markerY - lh / 2) + 'px';
+    if (r.para !== s.paraSpacing) { for (const ln of r.content.children) ln.style.marginBottom = s.paraSpacing ? s.paraSpacing + 'em' : ''; r.para = s.paraSpacing; }
+    const mk = r.marker.style;
+    r.marker.className = 'tp-marker ' + s.markerStyle;
+    r.marker.hidden = !s.showMarker;
+    mk.top = markerY + 'px';
+    mk.setProperty('--lh', lh + 'px');
+    // arrows live inside the side padding so they never sit on text or off-screen
+    const as = clamp(Math.min(fs * 0.3, side * 0.42), 5, 60);
+    mk.setProperty('--as', as + 'px');
+    mk.setProperty('--al', ins.l + Math.max(2, side * 0.12) + 'px');
+    mk.setProperty('--ar', ins.r + Math.max(2, side * 0.12) + 'px');
+    mk.setProperty('--ml', padL * 0.5 + 'px'); mk.setProperty('--mr', padR * 0.5 + 'px');
+    const f = s.fadeSize;
+    const mask = s.fadeEdges ? `linear-gradient(to bottom, transparent 0%, #000 ${f}%, #000 ${100 - f}%, transparent 100%)` : 'none';
+    r.view.style.webkitMaskImage = mask; r.view.style.maskImage = mask;
+    const p = r.progress.style;
+    r.progress.hidden = !s.showProgress;
+    p.left = padL + 'px'; p.right = padR + 'px'; p.bottom = ins.b + Math.max(4, H * 0.015) + 'px';
+    r.count.style.fontSize = Math.round(Math.min(W, H) * 0.42) + 'px';
+    r.count.style.color = s.textColor;
+  },
+  max: (r, H) => Math.max(0, r.content.offsetHeight - H),
+  set(r, off, max) {
+    r.content.style.transform = `translate3d(0,${-off}px,0)`;
+    r.bar.style.width = (max > 0 ? Math.min(100, (off / max) * 100) : 0) + '%';
+  },
+  countdown(r, n) { if (n > 0) { r.count.textContent = n; r.count.classList.add('on'); } else r.count.classList.remove('on'); },
+};
+
+/* ================= routing ================= */
+const app = $('#app');
+function go(role) { location.hash = role ? '#' + role : ''; location.reload(); }
+const role = location.hash.slice(1);
+if (role === 'prompter') startPrompter();
+else if (role === 'controller') startController();
+else showPicker();
+
+function showPicker() {
+  app.innerHTML = `
+  <section id="picker">
+    <div style="display:grid;gap:10px;justify-items:center">
+      <h1>Which screen is this?</h1>
+      <p>Open this same link on every device. Pick one Controller (your laptop) and one or more Prompters (the phone or tablet in the mirror rig).</p>
+    </div>
+    <div class="roles">
+      <button class="role" id="pickC">
+        <svg viewBox="0 0 40 40"><rect x="4" y="8" width="32" height="20" rx="2"/><path d="M2 32h36M16 18l6-4v8z"/></svg>
+        <span class="tag">Laptop</span><b>Controller</b>
+        <span class="mute">Edit the script, see a live preview of what's on the prompter, and drive every setting.</span>
+      </button>
+      <button class="role" id="pickP">
+        <svg viewBox="0 0 40 40"><rect x="4" y="11" width="32" height="18" rx="3"/><path d="M10 17h14M10 21h20M10 25h9"/></svg>
+        <span class="tag">Phone / tablet</span><b>Prompter</b>
+        <span class="mute">Full screen, horizontal and mirrored for beam-splitter glass. Nothing to tap once it's running.</span>
+      </button>
+    </div>
+    <div id="syncNote">Devices sync over the internet using the controller's session code, encrypted end to end. No sign-in and no shared Wi-Fi needed.</div>
+  </section>`;
+  $('#pickC').onclick = () => { lsSet('tp-role', 'controller'); go('controller'); };
+  $('#pickP').onclick = () => { lsSet('tp-role', 'prompter'); go('prompter'); };
+}
+
+/* ================= prompter ================= */
+function startPrompter() {
+  app.innerHTML = `<div id="prom"><div id="pStage"></div><div id="probe"></div>
+    <div id="pStart"><b>Prompter ready</b><span>Tap to go full screen. The text turns horizontal and mirrored automatically. Everything else is controlled from the laptop.</span><button id="pGo">Start</button></div>
+    <form id="pCode" hidden><b>Enter the session code</b><span>It's shown on the controller, under the QR code.</span><input id="pCodeIn" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="ABCD 2345" aria-label="Session code"><button>Connect</button></form>
+    <div id="pPill" hidden>Connecting…</div><button id="pMenu">Switch screen</button></div>`;
+  const prom = $('#prom'), stage = $('#pStage'), probe = $('#probe'), pill = $('#pPill'), start = $('#pStart'), menu = $('#pMenu');
+  const R = TP.mount(stage);
+  let S = Object.assign({}, DEFAULTS, { playing: false });
+  let SW = 0, SH = 0, sIns = Z, W = 0, H = 0, ins = Z, off = 0, max = 0, cdEnd = 0, gotState = false;
+  const ua = navigator.userAgent;
+  const name = /iPad/.test(ua) ? 'iPad' : /iPhone/.test(ua) ? 'iPhone' : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android phone' : 'Android tablet') : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : 'Device';
+
+  function measure() {
+    SW = prom.clientWidth; SH = prom.clientHeight;
+    const cs = getComputedStyle(probe);
+    sIns = { t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0, b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0 };
+    layout();
+  }
+  function layout() {
+    if (!SW || !SH) return;
+    const rot = S.rotate === 'auto' ? (SW < SH ? 90 : 0) : (+S.rotate || 0);
+    if (rot) { W = SH; H = SW; ins = rot > 0 ? { l: sIns.t, r: sIns.b, t: sIns.r, b: sIns.l } : { l: sIns.b, r: sIns.t, t: sIns.l, b: sIns.r }; }
+    else { W = SW; H = SH; ins = sIns; }
+    const f = max ? off / max : 0;
+    TP.apply(R, S, W, H, ins);
+    prom.style.background = S.bgColor;
+    stage.style.left = (SW - W) / 2 + 'px'; stage.style.top = (SH - H) / 2 + 'px';
+    stage.style.transform = `rotate(${rot}deg) scale(${S.mirrorX ? -1 : 1},${S.mirrorY ? -1 : 1})`;
+    const nm = TP.max(R, H);
+    if (nm !== max) { off = f * nm; max = nm; }
+    TP.set(R, off, max);
+  }
+  function applyState(next) {
+    const was = S.playing;
+    S = Object.assign({}, DEFAULTS, next);
+    if (S.playing && !was) {
+      if (off >= max - 1) off = 0;
+      endSent = false;
+      cdEnd = S.countdown > 0 ? performance.now() + S.countdown * 1000 : 0;
+    }
+    if (!S.playing) cdEnd = 0;
+    layout();
+  }
+
+  async function goFull() {
+    start.hidden = true;
+    const d = document.documentElement;
+    try { const p = d.requestFullscreen ? d.requestFullscreen({ navigationUI: 'hide' }) : d.webkitRequestFullscreen && d.webkitRequestFullscreen(); if (p && p.then) await p.catch(() => {}); } catch (e) {}
+    try { const p = screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape'); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+    requestAnimationFrame(measure);
+  }
+  $('#pGo').onclick = (e) => { e.stopPropagation(); goFull(); };
+  start.onclick = goFull;
+  menu.onclick = (e) => { e.stopPropagation(); go(''); };
+  let menuT; prom.addEventListener('pointerdown', () => { menu.style.opacity = .7; clearTimeout(menuT); menuT = setTimeout(() => (menu.style.opacity = 0), 3000); });
+  setTimeout(() => (menu.style.opacity = 0), 5000);
+  new ResizeObserver(() => requestAnimationFrame(measure)).observe(prom);
+  ['orientationchange', 'fullscreenchange', 'webkitfullscreenchange'].forEach((e) => addEventListener(e, () => requestAnimationFrame(measure)));
+  measure();
+
+  let sendPos = null, lastSig = '', lastSent = 0, last = performance.now(), endSent = false;
+  const code = cleanCode(params.get('r'));
+  if (!code) {
+    start.hidden = true; const f = $('#pCode'); f.hidden = false;
+    f.onclick = (e) => e.stopPropagation();
+    f.onsubmit = (e) => { e.preventDefault(); const c = cleanCode($('#pCodeIn').value); if (c.length >= 4) location.href = location.pathname + '?r=' + c + '#prompter'; };
+  } else {
+    let did = lsGet('tp-did'); if (!did) { did = 'd' + Math.random().toString(36).slice(2, 8); lsSet('tp-did', did); }
+    pill.hidden = false; pill.textContent = 'Connecting…';
+    Net.on('conn', (c) => { pill.hidden = c; pill.textContent = 'Reconnecting…'; });
+    Net.on('state', (m) => { if (m && typeof m === 'object') applyState(m); });
+    Net.on('cmd', (m) => { if (m && m.t === 'seek' && typeof m.f === 'number') { off = clamp(m.f, 0, 1) * max; endSent = false; } });
+    Net.start(code);
+    sendPos = (o) => Net.pub('pos/' + did, o);
+  }
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    let cd = 0;
+    if (cdEnd) { const r = cdEnd - now; if (r <= 0) cdEnd = 0; else cd = Math.ceil(r / 1000); }
+    const running = S.playing && !cdEnd && off < max;
+    if (running) off = Math.min(max, off + TP.pxPerSec(S, H) * dt);
+    if (S.playing && !cdEnd && max > 0 && off >= max && !endSent) { endSent = true; Net.pub('cmd', { t: 'ended' }); }
+    TP.set(R, off, max); TP.countdown(R, cd);
+    if (sendPos) {
+      const sig = [Math.round(off), Math.round(max), cd, W, H, running].join();
+      if (sig !== lastSig ? now - lastSent > 66 : now - lastSent > 2000) {
+        lastSig = sig; lastSent = now;
+        sendPos({ role: 'prompter', name, off: Math.round(off * 10) / 10, max: Math.round(max), w: W, h: H, ins, cd, pl: running });
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+function pick(o, keys) { const r = {}; for (const k of keys) if (k in o) r[k] = o[k]; return r; }
+
+/* ================= controller ================= */
+function startController() {
+  const FONT_OPTS = Object.entries(FONTS).map(([k, v]) => [k, v[0]]);
+  const SECTIONS = [
+    ['Text', [
+      { k: 'fontFamily', t: 'select', l: 'Font', o: FONT_OPTS },
+      { k: 'textSize', t: 'range', l: 'Text size (% of screen height)', min: 4, max: 35, step: 0.5, u: '%' },
+      { k: 'fontWeight', t: 'range', l: 'Weight', min: 300, max: 900, step: 100 },
+      { k: 'lineHeight', t: 'range', l: 'Line spacing', min: 0.9, max: 2.6, step: 0.05 },
+      { k: 'paraSpacing', t: 'range', l: 'Paragraph spacing', min: 0, max: 2, step: 0.05, u: 'em' },
+      { k: 'letterSpacing', t: 'range', l: 'Letter spacing', min: -0.05, max: 0.4, step: 0.01, u: 'em' },
+      { k: 'wordSpacing', t: 'range', l: 'Word spacing', min: 0, max: 1, step: 0.05, u: 'em' },
+      { k: 'align', t: 'seg', l: 'Align', o: [['left', 'Left'], ['center', 'Center'], ['right', 'Right'], ['justify', 'Justify']] },
+      { k: 'uppercase', t: 'toggle', l: 'ALL CAPS' },
+    ]],
+    ['Layout', [
+      { k: 'padX', t: 'range', l: 'Side margins', min: 2, max: 30, step: 0.5, u: '%' },
+      { k: 'markerPos', t: 'range', l: 'Reading line height', min: 10, max: 90, step: 1, u: '%' },
+      { k: 'fadeEdges', t: 'toggle', l: 'Fade top and bottom' },
+      { k: 'fadeSize', t: 'range', l: 'Fade size', min: 2, max: 35, step: 1, u: '%' },
+      { k: 'showProgress', t: 'toggle', l: 'Progress bar' },
+    ]],
+    ['Reading guide', [
+      { k: 'showMarker', t: 'toggle', l: 'Show reading guide' },
+      { k: 'markerStyle', t: 'seg', l: 'Style', o: [['arrows', 'Arrows'], ['line', 'Line'], ['band', 'Band']] },
+      { k: 'markerColor', t: 'color', l: 'Guide color' },
+    ]],
+    ['Colors', [
+      { t: 'presets' },
+      { k: 'textColor', t: 'color', l: 'Text' },
+      { k: 'bgColor', t: 'color', l: 'Background' },
+      { k: 'cueColor', t: 'color', l: '[Cue] color' },
+    ]],
+    ['Mirror and orientation', [
+      { k: 'mirrorX', t: 'toggle', l: 'Mirror left–right (beam-splitter)' },
+      { k: 'mirrorY', t: 'toggle', l: 'Flip upside down' },
+      { k: 'rotate', t: 'seg', l: 'Orientation', o: [['auto', 'Always horizontal'], ['0', 'As held'], ['90', '90° ↻'], ['-90', '90° ↺']] },
+    ]],
+    ['Playback', [{ k: 'countdown', t: 'range', l: 'Countdown before start', min: 0, max: 10, step: 1, u: 's' }]],
+  ];
+  const PRESETS = [['#ffffff', '#000000'], ['#ffe14d', '#000000'], ['#7cff6b', '#000000'], ['#5fd4ff', '#000000'], ['#000000', '#ffffff'], ['#ffffff', '#0b2a5b']];
+  const UNITS = {}; SECTIONS.forEach(([, its]) => its.forEach((i) => i.k && (UNITS[i.k] = i)));
+
+  app.innerHTML = `
+  <div id="ctrl">
+    <header>
+      <h1>Mirror Prompter</h1>
+      <span id="conn" class="pill"><i></i>Connecting…</span>
+      <span id="devCount" class="pill"><i></i>No prompter</span>
+      <span class="spacer"></span>
+      <span class="mute" style="font-size:12px">Space play · ↑↓ speed · ←→ line · +/− size · Home restart · M mirror</span>
+      <button id="switch">Switch screen</button>
+    </header>
+    <aside class="col left">
+      <div class="row" style="justify-content:space-between"><b>Script</b><span class="mute" id="wc"></span></div>
+      <textarea id="script" spellcheck="true" placeholder="Paste or type your script…"></textarea>
+      <label class="row mute" for="follow"><input type="checkbox" id="follow" checked> Scroll the editor along with the prompter</label>
+      <div class="row"><button id="open">Open .txt</button><button id="clear">Clear</button><span id="clearAsk" hidden class="row"><span class="mute">Clear script?</span><button id="clearYes">Clear</button><button id="clearNo">Keep</button></span>
+        <input type="file" id="file" accept=".txt,text/plain" hidden></div>
+      <div class="mute" style="font-size:12px">Edits reach the prompter as you type, even mid-scroll. Text in [square brackets] shows as a colored cue.</div>
+    </aside>
+    <main class="center">
+      <div id="devs"></div>
+      <div id="pvWrap"><div id="pvDevice"><div id="pvStage"></div></div><div id="pvLabel"></div></div>
+      <div class="transport">
+        <button id="restart" title="Restart (Home)" aria-label="Restart">⏮</button>
+        <button id="back" title="Back 3 lines" aria-label="Back">◀◀</button>
+        <button id="play">▶ Play</button>
+        <button id="fwd" title="Forward 3 lines" aria-label="Forward">▶▶</button>
+        <div class="speed"><span class="mute">Speed</span><button id="sDown" aria-label="Slower">−</button><input type="range" id="speed" min="0" max="100" step="0.5" aria-label="Speed"><button id="sUp" aria-label="Faster">+</button><b id="speedV" style="width:40px;text-align:right;font-family:var(--mono)"></b></div>
+        <button id="aDown" title="Smaller text">A−</button><button id="aUp" title="Bigger text">A+</button>
+        <button id="mirror" title="Mirror (M)">Mirror</button>
+        <div id="status"><span id="stState"></span><span>Progress <b id="stProg">0%</b></span><span>Remaining <b id="stRem">—</b></span><span>Click the preview to jump · scroll over it to move</span></div>
+      </div>
+    </main>
+    <aside class="col right">
+      <div class="card"><b>Add a prompter</b>
+        <div class="mute" style="font-size:13px">Scan with the phone or tablet. Or open this site there, choose Prompter and type the code. Any network works.</div>
+        <div id="qr"></div><div class="mute" style="text-align:center;font-size:12px">Session code</div><div id="codeBig"></div><div id="qrText"></div>
+      </div>
+      <div id="syncWarn" class="notice" hidden style="margin-bottom:10px"></div>
+      <div id="ctls"></div>
+      <div class="row"><button id="reset" style="flex:1">Reset settings</button><span id="resetAsk" hidden class="row"><button id="resetYes">Reset</button><button id="resetNo">Cancel</button></span></div>
+    </aside>
+  </div>`;
+
+  let S = Object.assign({}, DEFAULTS, { playing: false });
+  const editAt = {};
+  const ctls = $('#ctls');
+  for (const [name, items] of SECTIONS) {
+    const d = document.createElement('details'); d.open = name !== 'Playback';
+    d.innerHTML = `<summary>${name}</summary>`;
+    for (const it of items) {
+      const w = document.createElement('div');
+      const id = 'c-' + (it.k || 'presets');
+      if (it.t === 'range') { w.className = 'ctl'; w.innerHTML = `<label for="${id}">${it.l}<b data-v="${it.k}"></b></label><input id="${id}" type="range" data-k="${it.k}" min="${it.min}" max="${it.max}" step="${it.step}">`; }
+      else if (it.t === 'select') { w.className = 'ctl'; w.innerHTML = `<label for="${id}">${it.l}</label><select id="${id}" data-k="${it.k}">${it.o.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>`; }
+      else if (it.t === 'seg') { w.className = 'ctl'; w.innerHTML = `<label>${it.l}</label><div class="seg">${it.o.map(([v, l]) => `<button data-seg="${it.k}" data-val="${v}">${l}</button>`).join('')}</div>`; }
+      else if (it.t === 'toggle') { w.className = 'tg'; w.innerHTML = `<label for="${id}">${it.l}</label><input id="${id}" type="checkbox" data-k="${it.k}">`; }
+      else if (it.t === 'color') { w.className = 'clr'; w.innerHTML = `<label for="${id}">${it.l}</label><input id="${id}" type="color" data-k="${it.k}">`; }
+      else if (it.t === 'presets') { w.className = 'presets'; w.innerHTML = PRESETS.map(([t, b]) => `<button data-pre="${t},${b}" style="color:${t};background:${b}" aria-label="Text ${t} on ${b}">Aa</button>`).join(''); }
+      d.appendChild(w);
+    }
+    ctls.appendChild(d);
+  }
+  ctls.addEventListener('input', (e) => {
+    const k = e.target.dataset.k; if (!k) return;
+    const it = UNITS[k];
+    set(k, it.t === 'range' ? parseFloat(e.target.value) : it.t === 'toggle' ? e.target.checked : e.target.value);
+  });
+  ctls.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.seg) set(b.dataset.seg, b.dataset.val);
+    if (b.dataset.pre) { const [t, g] = b.dataset.pre.split(','); set('textColor', t); set('bgColor', g); }
+  });
+  const fmt = (k, v) => { const it = UNITS[k]; if (!it) return v; const d = it.step < 0.1 ? 2 : it.step < 1 ? 1 : 0; return (+v).toFixed(d) + (it.u || ''); };
+  function sync(keys) {
+    for (const k of keys || Object.keys(S)) {
+      const v = S[k];
+      document.querySelectorAll(`[data-k="${k}"]`).forEach((el) => {
+        if (el === document.activeElement && el.type !== 'checkbox') return;
+        if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
+      });
+      document.querySelectorAll(`[data-v="${k}"]`).forEach((el) => (el.textContent = fmt(k, v)));
+      document.querySelectorAll(`[data-seg="${k}"]`).forEach((el) => el.classList.toggle('on', el.dataset.val === String(v)));
+      if (k === 'text') { if (document.activeElement !== $('#script')) $('#script').value = v; wordCount(); }
+      if (k === 'speed') { if (document.activeElement !== $('#speed')) $('#speed').value = v; $('#speedV').textContent = (+v).toFixed(1); }
+      if (k === 'playing') { $('#play').textContent = v ? '❚❚ Pause' : '▶ Play'; $('#play').classList.toggle('playing', !!v); }
+      if (k === 'mirrorX') $('#mirror').classList.toggle('on', !!v);
+    }
+  }
+  let pubT = null;
+  function publishState() { if (pubT) return; pubT = setTimeout(() => { pubT = null; Net.pub('state', S, true); }, 80); }
+  function set(k, v) {
+    if (S[k] === v) return;
+    S[k] = v; editAt[k] = performance.now(); layoutDirty = true; sync([k]);
+    if (k === 'playing') playAt = performance.now();
+    publishState();
+  }
+  function showWarn(t) { const w = $('#syncWarn'); w.textContent = t; w.hidden = !t; }
+
+  // ---- devices ----
+  let devices = [], sel = null; const pos = {};
+  function renderDevices(force) {
+    const now = performance.now();
+    devices = Object.entries(pos).filter(([, p]) => now - p.at < 5000).map(([id, p]) => ({ id, p }));
+    if (sel && !devices.find((d) => d.id === sel)) sel = null;
+    if (!sel && devices.length) sel = devices[0].id;
+    const sig = devices.map((d) => d.id + ':' + d.p.w + 'x' + d.p.h).join() + '|' + sel;
+    if (!force && sig === renderDevices.sig) return; renderDevices.sig = sig;
+    const n = devices.length;
+    $('#devCount').innerHTML = `<i></i>${n ? n + (n === 1 ? ' prompter' : ' prompters') : 'No prompter'}`;
+    $('#devCount').className = 'pill' + (n ? ' ok' : '');
+    $('#devs').innerHTML = n
+      ? '<span class="mute">Previewing</span>' + devices.map((d) => `<button data-dev="${TP.esc(d.id)}" class="${d.id === sel ? 'on' : ''}">${TP.esc(String(d.p.name || 'Device'))} · ${d.p.w}×${d.p.h}</button>`).join('')
+      : '<span class="mute">No prompter yet. Scan the QR code with the phone or tablet. Until then the preview shows a sample landscape phone.</span>';
+  }
+  setInterval(() => renderDevices(), 1000);
+  $('#devs').addEventListener('click', (e) => { const b = e.target.closest('[data-dev]'); if (b) { sel = b.dataset.dev; renderDevices(true); } });
+
+  // ---- session code + QR ----
+  const code = cleanCode(params.get('r')) || cleanCode(lsGet('tp-room')) || newCode();
+  lsSet('tp-room', code);
+  try { history.replaceState(null, '', location.pathname + '?r=' + code + '#controller'); } catch (e) {}
+  (function qr() {
+    const url = location.origin + location.pathname + '?r=' + code + '#prompter';
+    $('#codeBig').textContent = code.slice(0, 4) + ' ' + code.slice(4);
+    $('#qrText').textContent = url;
+    try { const q = qrcode(0, 'M'); q.addData(url); q.make(); $('#qr').innerHTML = q.createSvgTag({ cellSize: 4, margin: 2, scalable: true }); }
+    catch (e) { $('#qr').hidden = true; }
+  })();
+
+  // ---- preview ----
+  const PV = TP.mount($('#pvStage'));
+  let pvW = 844, pvH = 390, pvIns = Z, pvMax = 0, disp = 0, target = 0, scale = 1, layoutDirty = true, playAt = 0;
+  const sim = { off: 0 };
+  function relayout() {
+    const f = pvMax ? disp / pvMax : 0, sf = pvMax ? sim.off / pvMax : 0;
+    TP.apply(PV, S, pvW, pvH, pvIns);
+    pvMax = TP.max(PV, pvH); disp = f * pvMax; sim.off = sf * pvMax;
+    fit();
+  }
+  function fit() {
+    const r = $('#pvWrap').getBoundingClientRect();
+    scale = Math.max(0.05, Math.min((r.width - 32) / pvW, (r.height - 40) / pvH));
+    $('#pvDevice').style.width = pvW * scale + 'px'; $('#pvDevice').style.height = pvH * scale + 'px';
+    $('#pvStage').style.transform = `scale(${scale})`;
+    $('#pvLabel').textContent = `${sel ? 'LIVE' : 'SAMPLE'} · ${pvW}×${pvH} · shown unmirrored`;
+  }
+  new ResizeObserver(fit).observe($('#pvWrap'));
+  const mmss = (s) => { if (!isFinite(s)) return '—'; s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  let lastT = performance.now(), lastStat = 0;
+  function tick(now) {
+    const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+    const pr = sel && pos[sel] && now - pos[sel].at < 5000 ? pos[sel] : null;
+    const W = pr ? pr.w : 844, H = pr ? pr.h : 390, ins = (pr && pr.ins) || Z;
+    if (W !== pvW || H !== pvH || JSON.stringify(ins) !== JSON.stringify(pvIns)) { pvW = W; pvH = H; pvIns = ins; layoutDirty = true; }
+    if (layoutDirty) { layoutDirty = false; relayout(); }
+    const pps = TP.pxPerSec(S, pvH);
+    let cd = 0, dOff, dMax, running;
+    if (pr) {
+      const at = pr.at;
+      dOff = Math.min(pr.max, pr.off + (pr.pl ? (pps * (now - at)) / 1000 : 0));
+      if (seekHold && now - seekHold.t < 600) dOff = seekHold.f * pr.max;
+      dMax = pr.max; cd = pr.cd; running = pr.pl;
+      target = dMax ? (dOff / dMax) * pvMax : 0;
+      disp = Math.abs(target - disp) > pvH * 0.5 ? target : disp + (target - disp) * Math.min(1, dt * 12);
+    } else {
+      if (S.playing) { sim.off = Math.min(pvMax, sim.off + pps * dt); if (sim.off >= pvMax && pvMax > 0) set('playing', false); }
+      target = disp = sim.off; dOff = sim.off; dMax = pvMax; running = S.playing;
+    }
+    TP.set(PV, disp, pvMax); TP.countdown(PV, cd);
+    if (now - lastStat > 250) {
+      lastStat = now;
+      $('#stState').innerHTML = cd ? `<b>Starting in ${cd}</b>` : running ? '<b style="color:var(--tally)">● On air</b>' : 'Paused';
+      $('#stProg').textContent = dMax ? Math.round((dOff / dMax) * 100) + '%' : '0%';
+      $('#stRem').textContent = mmss(pps ? (dMax - dOff) / pps : Infinity);
+      const ta = $('#script');
+      if ($('#follow').checked && document.activeElement !== ta && dMax) ta.scrollTop = (dOff / dMax) * (ta.scrollHeight - ta.clientHeight);
+    }
+    requestAnimationFrame(tick);
+  }
+  let seekHold = null;
+  function seekTo(v) {
+    v = clamp(v, 0, pvMax);
+    const f = pvMax ? v / pvMax : 0;
+    Net.pub('cmd', { t: 'seek', f });
+    disp = target = sim.off = v; seekHold = { f, t: performance.now() };
+  }
+  const lineH = () => TP.fontPx(S, pvH) * S.lineHeight;
+  $('#pvDevice').addEventListener('click', (e) => {
+    const r = $('#pvDevice').getBoundingClientRect();
+    seekTo(target + (e.clientY - r.top) / scale - (pvH * S.markerPos) / 100);
+  });
+  $('#pvDevice').addEventListener('wheel', (e) => { e.preventDefault(); seekTo(target + (e.deltaMode === 1 ? e.deltaY * lineH() : e.deltaY / scale)); }, { passive: false });
+
+  // ---- transport ----
+  const togglePlay = () => set('playing', !S.playing);
+  const restart = () => { set('playing', false); seekTo(0); };
+  $('#play').onclick = togglePlay; $('#restart').onclick = restart;
+  $('#back').onclick = () => seekTo(target - lineH() * 3);
+  $('#fwd').onclick = () => seekTo(target + lineH() * 3);
+  $('#speed').oninput = (e) => set('speed', parseFloat(e.target.value));
+  $('#sDown').onclick = () => set('speed', Math.max(0, S.speed - 1));
+  $('#sUp').onclick = () => set('speed', Math.min(100, S.speed + 1));
+  $('#aDown').onclick = () => set('textSize', Math.max(4, S.textSize - 0.5));
+  $('#aUp').onclick = () => set('textSize', Math.min(35, S.textSize + 0.5));
+  $('#mirror').onclick = () => set('mirrorX', !S.mirrorX);
+  $('#switch').onclick = () => go('');
+  $('#reset').onclick = () => { $('#resetAsk').hidden = false; };
+  $('#resetNo').onclick = () => { $('#resetAsk').hidden = true; };
+  $('#resetYes').onclick = () => { $('#resetAsk').hidden = true; for (const k in DEFAULTS) if (k !== 'text' && k !== 'playing') set(k, DEFAULTS[k]); };
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color'].includes(t.type)) || e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key; let used = true;
+    if (k === ' ') togglePlay();
+    else if (k === 'ArrowUp') set('speed', Math.min(100, S.speed + 1));
+    else if (k === 'ArrowDown') set('speed', Math.max(0, S.speed - 1));
+    else if (k === 'ArrowLeft') seekTo(target - lineH());
+    else if (k === 'ArrowRight') seekTo(target + lineH());
+    else if (k === 'PageUp') seekTo(target - pvH * 0.7);
+    else if (k === 'PageDown') seekTo(target + pvH * 0.7);
+    else if (k === 'Home') restart();
+    else if (k === '+' || k === '=') set('textSize', Math.min(35, S.textSize + 0.5));
+    else if (k === '-' || k === '_') set('textSize', Math.max(4, S.textSize - 0.5));
+    else if (k === 'm' || k === 'M') set('mirrorX', !S.mirrorX);
+    else used = false;
+    if (used) { e.preventDefault(); if (t.blur && t !== document.body) t.blur(); }
+  });
+
+  // ---- script ----
+  function wordCount() { const n = (S.text.match(/\S+/g) || []).length; $('#wc').textContent = `${n} words · ~${mmss((n / 150) * 60)} at 150 wpm`; }
+  $('#script').addEventListener('input', (e) => set('text', e.target.value));
+  $('#open').onclick = () => $('#file').click();
+  $('#file').onchange = async (e) => { const f = e.target.files[0]; if (!f) return; const t = await f.text(); $('#script').value = t; set('text', t); e.target.value = ''; };
+  $('#clear').onclick = () => { $('#clearAsk').hidden = false; };
+  $('#clearNo').onclick = () => { $('#clearAsk').hidden = true; };
+  $('#clearYes').onclick = () => { $('#clearAsk').hidden = true; $('#script').value = ''; set('text', ''); };
+
+  sync(); requestAnimationFrame(tick);
+
+  // ---- connect ----
+  let gotState = false;
+  Net.on('conn', (c) => {
+    $('#conn').innerHTML = `<i></i>${c ? 'Live sync on' : 'Connecting…'}`; $('#conn').className = 'pill' + (c ? ' ok' : '');
+    if (c) setTimeout(() => { if (!gotState) { gotState = true; Net.pub('state', S, true); } }, 1500);
+  });
+  Net.on('state', (m) => {
+    if (!m || typeof m !== 'object') return;
+    const first = !gotState; gotState = true;
+    const now = performance.now(), keys = [];
+    for (const k in DEFAULTS) if (k in m && m[k] !== S[k] && !(now - (editAt[k] || 0) < 1500)) { S[k] = m[k]; keys.push(k); }
+    if (first && S.playing) { S.playing = false; keys.push('playing'); publishState(); }
+    if (keys.length) { sync(keys); layoutDirty = true; }
+  });
+  Net.on('pos', (m, sub) => { const id = sub.split('/')[1]; if (!id || !m || typeof m !== 'object') return; m.at = performance.now(); const isNew = !pos[id]; pos[id] = m; if (isNew) renderDevices(); });
+  Net.on('cmd', (m) => { if (m && m.t === 'ended' && S.playing && performance.now() - playAt > 1500) set('playing', false); });
+  Net.start(code);
+}
+</script>
